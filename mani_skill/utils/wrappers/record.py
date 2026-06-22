@@ -562,6 +562,7 @@ class RecordEpisode(gym.Wrapper):
             env_idxs_to_flush = np.arange(0, self.num_envs)
         for env_idx in env_idxs_to_flush:
             start_ptr = self._trajectory_buffer.env_episode_ptr[env_idx]
+            print('[Record] start_ptr:', start_ptr)
             end_ptr = len(self._trajectory_buffer.done)
             if ignore_empty_transition and end_ptr - start_ptr <= 1:
                 continue
@@ -755,6 +756,7 @@ class RecordEpisode(gym.Wrapper):
 
     def flush_video(
         self,
+        dir_name=None,
         name=None,
         suffix="",
         verbose=False,
@@ -792,9 +794,14 @@ class RecordEpisode(gym.Wrapper):
                             video_name += "_" + suffix
             else:
                 video_name = name
+            if dir_name is not None:
+                video_output_dir = str(self.output_dir) + f"/{dir_name}"
+            else: 
+                video_output_dir = str(self.output_dir) + "/demos"
+            print("video name:", video_output_dir, video_name)
             images_to_video(
                 self.render_images,
-                str(self.output_dir),
+                video_output_dir,
                 video_name=video_name,
                 fps=self.video_fps,
                 verbose=verbose,

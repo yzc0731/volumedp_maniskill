@@ -37,6 +37,7 @@ def parse_args(args=None):
     parser.add_argument("--shader", default="default", type=str, help="Change shader used for rendering. Default is 'default' which is very fast. Can also be 'rt' for ray tracing and generating photo-realistic renders. Can also be 'rt-fast' for a faster but lower quality ray-traced renderer")
     parser.add_argument("--record-dir", type=str, default="demos", help="where to save the recorded trajectories")
     parser.add_argument("--num-procs", type=int, default=1, help="Number of processes to use to help parallelize the trajectory replay process. This uses CPU multiprocessing and only works with the CPU simulation backend at the moment.")
+    parser.add_argument("--filter-length", action="store_true", help="If set, will filter out trajectories that are too long.")
     return parser.parse_args()
 
 def _main(args, proc_id: int = 0, start_seed: int = 0) -> str:
@@ -87,6 +88,10 @@ def _main(args, proc_id: int = 0, start_seed: int = 0) -> str:
             print(f"Cannot find valid solution because of an error in motion planning solution: {e}")
             res = -1
 
+        if args.filter_length and res != -1 and res[-1]["elapsed_steps"].item() >= (env.max_episode_steps/1.5):
+            res = -1
+            print(f"too more steps")
+
         if res == -1:
             success = False
             failed_motion_plans += 1
@@ -99,12 +104,12 @@ def _main(args, proc_id: int = 0, start_seed: int = 0) -> str:
             seed += 1
             env.flush_trajectory(save=False)
             if args.save_video:
-                env.flush_video(save=False)
+                env.flush_video(dir_name=args.traj_name, save=False)
             continue
         else:
             env.flush_trajectory()
             if args.save_video:
-                env.flush_video()
+                env.flush_video(dir_name=args.traj_name)
             pbar.update(1)
             pbar.set_postfix(
                 dict(

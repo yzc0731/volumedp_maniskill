@@ -1,10 +1,10 @@
 from typing import Any, Dict, Union
-
+import math
 import numpy as np
 import sapien
 import torch
 
-from mani_skill.agents.robots.panda import PandaWristCam
+from mani_skill.agents.robots.panda import Panda, PandaWristCam, PandaPeg
 from mani_skill.envs.sapien_env import BaseEnv
 from mani_skill.envs.scene import ManiSkillScene
 from mani_skill.envs.utils import randomization
@@ -14,6 +14,42 @@ from mani_skill.utils.registration import register_env
 from mani_skill.utils.scene_builder.table import TableSceneBuilder
 from mani_skill.utils.structs import Actor, Pose
 from mani_skill.utils.structs.types import SimConfig
+
+def batch_quat2axisangle_wxyz(quat_batch):
+    """
+    Converts batch of quaternions (w,x,y,z) to axis-angle format.
+    Supports vectorized computation for batch processing, avoiding loops.
+
+    Args:
+        quat_batch (np.array): Shape (batch_size, 4), each row is (w,x,y,z) quaternion
+
+    Returns:
+        np.array: Shape (batch_size, 3), each row is (ax,ay,az) axis-angle exponential coordinates
+    """
+
+    if quat_batch.ndim != 2 or quat_batch.shape[1] != 4:
+        raise ValueError("Input must be shape (batch_size, 4) representing quaternions in (w,x,y,z) format.")
+
+    w = quat_batch[:, 0]
+    x = quat_batch[:, 1]
+    y = quat_batch[:, 2]
+    z = quat_batch[:, 3]
+
+    w_clipped = np.clip(w, -1.0, 1.0)
+
+    den = np.sqrt(1.0 - w_clipped **2)
+
+    angle = 2.0 * np.arccos(w_clipped)
+
+    zero_rot_mask = np.isclose(den, 0.0, atol=1e-9)
+
+    axis_angle = np.zeros_like(quat_batch[:, :3])
+    non_zero_mask = ~zero_rot_mask
+    axis_angle[non_zero_mask, 0] = x[non_zero_mask] * angle[non_zero_mask] / den[non_zero_mask]
+    axis_angle[non_zero_mask, 1] = y[non_zero_mask] * angle[non_zero_mask] / den[non_zero_mask]
+    axis_angle[non_zero_mask, 2] = z[non_zero_mask] * angle[non_zero_mask] / den[non_zero_mask]
+
+    return axis_angle
 
 
 def _build_box_with_hole(
@@ -47,7 +83,7 @@ def _build_box_with_hole(
     return builder
 
 
-@register_env("PegInsertionSide-v1", max_episode_steps=100)
+@register_env("PegInsertionSide-v1", max_episode_steps=300)
 class PegInsertionSideEnv(BaseEnv):
     """
     **Task Description:**
@@ -64,14 +100,14 @@ class PegInsertionSideEnv(BaseEnv):
     """
 
     _sample_video_link = "https://github.com/haosulab/ManiSkill/raw/main/figures/environment_demos/PegInsertionSide-v1_rt.mp4"
-    SUPPORTED_ROBOTS = ["panda_wristcam"]
-    agent: Union[PandaWristCam]
-    _clearance = 0.003
+    SUPPORTED_ROBOTS = ["panda", "panda_wristcam", "panda_peg"]
+    agent: Union[Panda, PandaWristCam, PandaPeg]
+    _clearance = 0.008
 
     def __init__(
         self,
         *args,
-        robot_uids="panda_wristcam",
+        robot_uids="panda_peg",
         num_envs=1,
         reconfiguration_freq=None,
         **kwargs,
@@ -95,13 +131,13 @@ class PegInsertionSideEnv(BaseEnv):
 
     @property
     def _default_sensor_configs(self):
-        pose = sapien_utils.look_at([0, -0.3, 0.2], [0, 0, 0.1])
-        return [CameraConfig("base_camera", pose, 128, 128, np.pi / 2, 0.01, 100)]
+        pose = sapien_utils.look_at([0.4, 0.0, 0.15], [0.05, 0.03, 0.1])
+        return [CameraConfig("base_camera", pose, 256, 256, np.pi / 2, 0.01, 100)]
 
     @property
     def _default_human_render_camera_configs(self):
-        pose = sapien_utils.look_at([0.5, -0.5, 0.8], [0.05, -0.1, 0.4])
-        return CameraConfig("render_camera", pose, 512, 512, 1, 0.01, 100)
+        pose = sapien_utils.look_at([0.4, 0.0, 0.15], [0.05, 0.03, 0.1])
+        return CameraConfig("render_camera", pose, 256, 256, np.pi / 2, 0.01, 100)
 
     def _load_agent(self, options: dict):
         super()._load_agent(options, sapien.Pose(p=[-0.615, 0, 0]))
@@ -111,8 +147,8 @@ class PegInsertionSideEnv(BaseEnv):
             self.table_scene = TableSceneBuilder(self)
             self.table_scene.build()
 
-            lengths = self._batched_episode_rng.uniform(0.085, 0.125)
-            radii = self._batched_episode_rng.uniform(0.015, 0.025)
+            lengths = self._batched_episode_rng.uniform(0.085, 0.1)
+            radii = self._batched_episode_rng.uniform(0.015, 0.017)
             centers = (
                 0.5
                 * (lengths - radii)[:, None]
@@ -197,7 +233,7 @@ class PegInsertionSideEnv(BaseEnv):
 
             # initialize the box and peg
             xy = randomization.uniform(
-                low=torch.tensor([-0.1, -0.3]), high=torch.tensor([0.1, 0]), size=(b, 2)
+                low=torch.tensor([-0.05, -0.2]), high=torch.tensor([0.1, 0.0]), size=(b, 2)
             )
             pos = torch.zeros((b, 3))
             pos[:, :2] = xy
@@ -207,7 +243,7 @@ class PegInsertionSideEnv(BaseEnv):
                 self.device,
                 lock_x=True,
                 lock_y=True,
-                bounds=(np.pi / 2 - np.pi / 3, np.pi / 2 + np.pi / 3),
+                bounds=(np.pi / 2 - np.pi / 8, np.pi / 2 + np.pi / 8),
             )
             self.peg.set_pose(Pose.create_from_pq(pos, quat))
 
@@ -224,7 +260,7 @@ class PegInsertionSideEnv(BaseEnv):
                 self.device,
                 lock_x=True,
                 lock_y=True,
-                bounds=(np.pi / 2 - np.pi / 8, np.pi / 2 + np.pi / 8),
+                bounds=(np.pi / 2 + np.pi / 16, np.pi / 2 + np.pi / 8),
             )
             self.box.set_pose(Pose.create_from_pq(pos, quat))
 
@@ -278,16 +314,40 @@ class PegInsertionSideEnv(BaseEnv):
             peg_head_pos_at_hole[:, 2] <= self.box_hole_radii
         )
         return (
-            x_flag & y_flag & z_flag,
+            x_flag,
+            y_flag,
+            z_flag,
             peg_head_pos_at_hole,
         )
 
     def evaluate(self):
-        success, peg_head_pos_at_hole = self.has_peg_inserted()
-        return dict(success=success, peg_head_pos_at_hole=peg_head_pos_at_hole)
+        x_flag, y_flag, z_flag, peg_head_pos_at_hole = self.has_peg_inserted()
+
+        success = x_flag & y_flag & z_flag
+
+        z_threshold = self.peg_half_sizes[:, 2] + 0.05
+        is_lifted = self.peg.pose.p[:, 2] > z_threshold
+        is_aligned = y_flag & z_flag
+        return dict(
+            success=success, 
+            peg_head_pos_at_hole=peg_head_pos_at_hole,
+            is_lifted=is_lifted,
+            is_aligned=is_aligned
+        )
 
     def _get_obs_extra(self, info: Dict):
-        obs = dict(tcp_pose=self.agent.tcp.pose.raw_pose)
+        ee_pos = self.agent.tcp.pose.p
+        ee_quat = self.agent.tcp.pose.q
+        ee_axisangle = batch_quat2axisangle_wxyz(ee_quat)
+        ee_p_axisangle = torch.cat([ee_pos, torch.from_numpy(ee_axisangle)], dim=-1)
+        obs = dict(
+            tcp_pose=self.agent.tcp.pose.raw_pose,
+            ee_pos=ee_pos,
+            ee_ori=ee_axisangle,
+            ee_states=ee_p_axisangle,
+            joint_states=self.agent.robot.get_qpos()[:, :-2],
+            gripper_states=self.agent.robot.get_qpos()[:, -2:],
+        )
         if self.obs_mode_struct.use_state:
             obs.update(
                 peg_pose=self.peg.pose.raw_pose,
